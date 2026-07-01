@@ -7,7 +7,7 @@ async function main() {
 
   // Clean up
   await prisma.notification.deleteMany()
-  await prisma.aiDecisionLog.deleteMany()
+  await prisma.aIDecisionLog.deleteMany()
   await prisma.automationRun.deleteMany()
   await prisma.auditLog.deleteMany()
   await prisma.approval.deleteMany()
