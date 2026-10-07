@@ -1,0 +1,114 @@
+name: GMI AppSec Gate
+
+on:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  trivy:
+    name: GMI AppSec / Trivy
+    runs-on: [self-hosted, appsec, trivy]
+    timeout-minutes: 20
+
+    env:
+      TRIVY_CACHE_DIR: /var/lib/trivy-cache
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Report scan to AppSec dashboard
+        continue-on-error: true
+        shell: bash
+        run: |
+          if command -v gmi-appsec-ci >/dev/null 2>&1 && curl -fsS http://127.0.0.1:8089/healthz 2>/dev/null | jq -e '.status == "ok"' >/dev/null 2>&1; then
+            gmi-appsec-ci "$GITHUB_WORKSPACE" "$GITHUB_REPOSITORY"
+          else
+            echo "gmi-appsec-ci unavailable on this runner -- skipping the Elastic report for this PR scan (push/schedule scans are unaffected)."
+          fi
+
+      - name: Block vulnerable or misconfigured code
+        run: |
+          trivy fs \
+            --scanners vuln,misconfig \
+            --severity HIGH,CRITICAL \
+            --format sarif \
+            --output trivy-vuln-misconfig.sarif \
+            --exit-code 1 \
+            --timeout 15m \
+            .
+
+      - name: Print vulnerability/misconfig findings to the log
+        if: always()
+        run: |
+          python3 -c "
+          import json
+          d = json.load(open('trivy-vuln-misconfig.sarif'))
+          found = False
+          for run in d.get('runs', []):
+              rules = {r['id']: r for r in run.get('tool', {}).get('driver', {}).get('rules', [])}
+              for res in run.get('results', []):
+                  found = True
+                  rule = rules.get(res.get('ruleId'), {})
+                  sev = rule.get('properties', {}).get('security-severity', '?')
+                  loc = res.get('locations', [{}])[0].get('physicalLocation', {})
+                  path = loc.get('artifactLocation', {}).get('uri', '?')
+                  line = loc.get('region', {}).get('startLine', '?')
+                  msg = res.get('message', {}).get('text', '').replace(chr(10), ' ')
+                  print(f\"::error file={path},line={line},title={res.get('ruleId')} (severity {sev})::{msg}\")
+          if not found:
+              print('No vulnerability/misconfig findings.')
+          "
+
+      - name: Upload vulnerability/misconfig findings (with fix guidance) to GitHub
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-vuln-misconfig.sarif
+          category: trivy-vuln-misconfig
+
+      - name: Block detected secrets
+        if: always()
+        run: |
+          trivy fs \
+            --scanners secret \
+            --format sarif \
+            --output trivy-secrets.sarif \
+            --exit-code 1 \
+            --timeout 15m \
+            .
+
+      - name: Print secret findings to the log
+        if: always()
+        run: |
+          python3 -c "
+          import json
+          d = json.load(open('trivy-secrets.sarif'))
+          found = False
+          for run in d.get('runs', []):
+              for res in run.get('results', []):
+                  found = True
+                  loc = res.get('locations', [{}])[0].get('physicalLocation', {})
+                  path = loc.get('artifactLocation', {}).get('uri', '?')
+                  line = loc.get('region', {}).get('startLine', '?')
+                  msg = res.get('message', {}).get('text', '').replace(chr(10), ' ')
+                  print(f\"::error file={path},line={line},title={res.get('ruleId')}::{msg}\")
+          if not found:
+              print('No secret findings.')
+          "
+
+      - name: Upload secret findings to GitHub
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-secrets.sarif
+          category: trivy-secrets
